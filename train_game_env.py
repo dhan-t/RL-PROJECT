@@ -14,7 +14,6 @@ class TrainGameEnv:
     Action Space:
         - 0: Add carriage (+100 capacity, high cost, high weight)
         - 1: Widen carriage (+50 capacity, medium cost, medium weight)
-        - 2: No action (no cost, no weight)
     
     Observation Space:
         - capacity: Current train capacity [0, inf)
@@ -42,7 +41,7 @@ class TrainGameEnv:
         self.initial_capacity = initial_capacity
         
         # Define Gymnasium spaces (MUST be attributes, not properties)
-        self.action_space = spaces.Discrete(3)  # 0: Add, 1: Widen, 2: None
+        self.action_space = spaces.Discrete(2)  # 0: Add, 1: Widen
         self.observation_space = spaces.Box(
             low=np.array([0, 0, 0, -1, 0, 0], dtype=np.float32),
             high=np.array([np.inf, np.inf, 12, 1, 23, 59], dtype=np.float32),
@@ -244,8 +243,8 @@ class TrainGameEnv:
         elif action == 1:  # Widen carriage (+50 capacity)  
             self.capacity += 50
             cost, weight = 5.0, 0.5
-        else:  # No action
-            cost, weight = 0.0, 0.0
+        else:
+            raise ValueError("Invalid action. Only 0 (Add carriage) and 1 (Widen carriage) are allowed.")
 
         # Track configuration cost (don't subtract from raw_score yet)
         self.total_config_cost += cost
