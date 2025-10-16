@@ -1,24 +1,53 @@
 # train_game_env.py
+# Gymnasium-compliant Train Game Environment for Reinforcement Learning
 import random
 import numpy as np
+from gymnasium import spaces
 
 class TrainGameEnv:
-    def __init__(self, initial_capacity=100, seed=None, verbose=False):
-        if seed is not None:
-            random.seed(seed)
-            np.random.seed(seed)
+    """
+    A Gymnasium-compatible environment for train capacity management.
+    
+    The agent must manage train capacity while maximizing passenger boarding
+    and minimizing waste (unused capacity) and infrastructure stress.
+    
+    Action Space:
+        - 0: Add carriage (+100 capacity, high cost, high weight)
+        - 1: Widen carriage (+50 capacity, medium cost, medium weight)
+        - 2: No action (no cost, no weight)
+    
+    Observation Space:
+        - capacity: Current train capacity [0, inf)
+        - passengers_onboard: Current passenger count [0, inf)
+        - station_idx: Current station index [0, 12]
+        - direction: Travel direction {-1, 1}
+        - hour: Current hour [0, 23]
+        - minute: Current minute [0, 59]
+    """
+    
+    metadata = {'render_modes': ['human'], 'render_fps': 2}
+    
+    def __init__(self, initial_capacity=100, seed=None, verbose=False, render_mode=None):
+        super().__init__()
+        
+        # Seeding
+        self._np_random = None
+        self.seed(seed)
+        
+        # Rendering
+        self.render_mode = render_mode
+        self.verbose = verbose
 
-        # Core game state
+        # Game parameters
         self.initial_capacity = initial_capacity
-        self.capacity = initial_capacity
-        self.passengers_onboard = 0
-
-        # Performance tracking
-        self.raw_score = 0.0
-        self.total_boarded = 0
-        self.total_unused = 0.0
-        self.total_config_cost = 0.0
-        self.peak_inefficiency = 0  # Track worst excess capacity
+        
+        # Define Gymnasium spaces (MUST be attributes, not properties)
+        self.action_space = spaces.Discrete(3)  # 0: Add, 1: Widen, 2: None
+        self.observation_space = spaces.Box(
+            low=np.array([0, 0, 0, -1, 0, 0], dtype=np.float32),
+            high=np.array([np.inf, np.inf, 12, 1, 23, 59], dtype=np.float32),
+            dtype=np.float32
+        )
 
         # Station configuration (LRT-2 line)
         self.stations = [
@@ -27,26 +56,36 @@ class TrainGameEnv:
             "Santolan", "Marikina", "Antipolo"
         ]
         self.num_stations = len(self.stations)
-        self.station_idx = 0
-        self.direction = +1
-
-        # Infrastructure stress management
-        self.weight_window = []
+        
+        # Infrastructure parameters
         self.window_size = 10
         self.base_collapse_threshold = 10.0
-
-        # Time management (04:00-22:00 operating hours)
-        self.sim_minutes = random.randint(4 * 60, 22 * 60 - 1)
-        self.steps = 0
         self.max_steps = 2000
-        self.station_visits = 0
 
-        # Efficiency tracking
-        self.previous_onboard = 0
-
-        self.done = False
+        # State variables (initialized in reset())
+        self.capacity = None
+        self.passengers_onboard = None
+        self.station_idx = None
+        self.direction = None
+        self.sim_minutes = None
+        self.steps = None
+        self.station_visits = None
+        self.previous_onboard = None
+        self.weight_window = None
+        self.raw_score = None
+        self.total_boarded = None
+        self.total_unused = None
+        self.total_config_cost = None
+        self.peak_inefficiency = None
+        self.done = None
         self.done_reason = None
-        self.verbose = verbose
+
+    def seed(self, seed=None):
+        """Set the random seed for reproducibility."""
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+        return [seed]
 
     # ----------------- core simulation methods -----------------
     def _time_multiplier(self, hour):
@@ -119,8 +158,19 @@ class TrainGameEnv:
         efficiency_multiplier *= capacity_factor
         return base_penalty * penalty_growth * efficiency_multiplier
 
-    def reset(self):
-        """Reset environment to initial state"""
+    def reset(self, seed=None, options=None):
+        """
+        Reset environment to initial state.
+        
+        Returns:
+            observation (np.ndarray): Initial state
+            info (dict): Additional information
+        """
+        # Handle seeding
+        if seed is not None:
+            self.seed(seed)
+            
+        # Reset all state variables
         self.capacity = self.initial_capacity
         self.passengers_onboard = 0
         self.raw_score = 0.0
@@ -138,7 +188,11 @@ class TrainGameEnv:
         self.previous_onboard = 0
         self.done = False
         self.done_reason = None
-        return self._get_state()
+        
+        observation = self._get_state()
+        info = self._get_info()
+        
+        return observation, info
 
     def _get_state(self):
         """Get current environment state vector"""
@@ -152,14 +206,36 @@ class TrainGameEnv:
             float(hour),
             float(minute)
         ], dtype=np.float32)
+    
+    def _get_info(self):
+        """Get additional info dictionary"""
+        return {
+            'total_boarded': self.total_boarded,
+            'total_config_cost': self.total_config_cost,
+            'station_visits': self.station_visits,
+            'peak_inefficiency': self.peak_inefficiency,
+            'current_station': self.stations[self.station_idx] if self.station_idx is not None else None,
+            'done_reason': self.done_reason
+        }
 
     def step(self, action):
-        """Execute one game step with given action"""
+        """
+        Execute one game step with given action.
+        
+        Returns:
+            observation (np.ndarray): New state
+            reward (float): Reward for this step
+            terminated (bool): Whether episode ended naturally
+            truncated (bool): Whether episode was truncated (time limit, etc.)
+            info (dict): Additional information
+        """
         if self.done:
             raise RuntimeError("Environment is done. Call reset().")
 
         alighted_passengers = 0
         self.previous_onboard = self.passengers_onboard
+        terminated = False
+        truncated = False
 
         # Process capacity actions
         if action == 0:  # Add carriage (+100 capacity)
@@ -171,10 +247,8 @@ class TrainGameEnv:
         else:  # No action
             cost, weight = 0.0, 0.0
 
-        # Apply configuration cost penalty
-        config_penalty = 2.0 * cost
+        # Track configuration cost (don't subtract from raw_score yet)
         self.total_config_cost += cost
-        self.raw_score -= config_penalty
 
         # Check for infrastructure collapse
         collapse_threshold = max(3.0, self.base_collapse_threshold - (self.steps / 200))
@@ -183,9 +257,12 @@ class TrainGameEnv:
             self.weight_window.pop(0)
         if sum(self.weight_window) >= collapse_threshold:
             self.done = True
+            terminated = True
             self.done_reason = f"Collapse at station {self.stations[self.station_idx]}"
             self.raw_score -= 500.0
-            return self._get_state(), -1000.0, True, {"reason": self.done_reason, "alighted": 0}
+            info = self._get_info()
+            info.update({'alighted': 0, 'collapse': True})
+            return self._get_state(), -1000.0, terminated, truncated, info
 
         # Passenger alighting simulation
         if self.passengers_onboard > 0:
@@ -207,15 +284,23 @@ class TrainGameEnv:
 
         # Calculate rewards and penalties
         current_hour = self.sim_minutes // 60
+        
+        # Reward for boarding passengers
+        reward_board = 1.5 * boarded
+        
+        # Penalty for unused capacity
         penalty_unused = self._calculate_efficiency_penalty(
             unused, alighted_passengers, self.previous_onboard, current_hour
         )
         
-        reward_board = 1.5 * boarded
-        station_reward = reward_board - penalty_unused
+        # Penalty for configuration changes (applied once)
+        config_penalty = 2.0 * cost
+        
+        # Calculate step reward (FIX: Don't double-count cost)
+        step_reward = reward_board - penalty_unused - config_penalty
 
         # Update game state
-        self.raw_score += station_reward
+        self.raw_score += step_reward
         self.total_boarded += boarded
         self.total_unused += unused
         self.station_visits += 1
@@ -225,6 +310,7 @@ class TrainGameEnv:
         self.sim_minutes += 5
         if self.sim_minutes >= 22 * 60:
             self.done = True
+            terminated = True
             self.done_reason = "End of operating hours (22:00)"
 
         # Move to next station
@@ -238,13 +324,23 @@ class TrainGameEnv:
         # Check step limit
         if self.steps >= self.max_steps:
             self.done = True
+            truncated = True
             self.done_reason = "Max steps reached."
 
-        return self._get_state(), station_reward - (0.2 * cost), self.done, {
-            "alighted": alighted_passengers,
-            "penalty_unused": penalty_unused,
-            "efficiency_ratio": alighted_passengers / max(1, self.previous_onboard)
-        }
+        # Prepare info dictionary (consistent structure)
+        info = self._get_info()
+        info.update({
+            'alighted': alighted_passengers,
+            'boarded': boarded,
+            'arrivals': arrivals,
+            'penalty_unused': penalty_unused,
+            'config_penalty': config_penalty,
+            'efficiency_ratio': alighted_passengers / max(1, self.previous_onboard),
+            'step_reward': step_reward
+        })
+
+        # Return standard Gymnasium 5-tuple (FIX: removed double cost subtraction)
+        return self._get_state(), step_reward, terminated, truncated, info
 
     def final_score(self):
         """Calculate final normalized score (1-100)"""
@@ -261,35 +357,10 @@ class TrainGameEnv:
         
         return max(1, min(100, normalized)), effective_score
 
-    # RL-SPECIFIC METHODS
-    @property
-    def observation_space(self):
-        """Define the observation space for RL"""
-        from gymnasium import spaces
-        return spaces.Box(
-            low=np.array([0, 0, 0, -1, 0, 0]),  # min values for each state element
-            high=np.array([np.inf, np.inf, 12, 1, 23, 59]),  # max values
-            dtype=np.float32
-        )
-    
-    @property 
-    def action_space(self):
-        """Define the action space for RL"""
-        from gymnasium import spaces
-        return spaces.Discrete(3)  # 0, 1, 2
-    
-    def get_info(self):
-        """Get additional info for monitoring"""
-        return {
-            'total_boarded': self.total_boarded,
-            'total_config_cost': self.total_config_cost,
-            'average_efficiency': self.total_boarded / max(1, self.capacity * self.steps),
-            'peak_inefficiency': self.peak_inefficiency
-        }
-
-    def render(self, mode='human'):
+    def render(self):
         """Render the environment for visualization"""
-        return draw_train(self)
+        if self.render_mode == 'human':
+            draw_train(self)
 
     def close(self):
         """Clean up resources"""
