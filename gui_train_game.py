@@ -1,0 +1,544 @@
+# gui_train_game.py
+import os
+import random
+import threading
+import time
+import pickle
+import tkinter as tk
+from tkinter import messagebox
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+# -------------------------
+# Agent loading system (auto-loads on import)
+# -------------------------
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+SAVE_DIR = os.path.join(BASE_DIR, "saved_agents")
+LOADED_AGENTS = {}  # name -> agent-like object exposing .policy(state, greedy=False)
+
+# Normalization used at training time (keep consistent with rl_training.ipynb)
+def _normalize_state_for_agent(state):
+    cap, onboard, station_idx, direction, hour, minute = state
+    return np.array([
+        cap / 1000.0,
+        onboard / 500.0,
+        station_idx / 12.0,
+        (direction + 1) / 2.0,
+        hour / 23.0,
+        minute / 59.0
+    ], dtype=np.float32)
+
+# Recreate the network architecture used in training so we can load state_dict
+class ActorCriticNet(nn.Module):
+    def __init__(self, state_dim=6, action_dim=2, hidden=128):
+        super().__init__()
+        self.fc1 = nn.Linear(state_dim, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.fc3 = nn.Linear(hidden, hidden)
+        self.actor = nn.Linear(hidden, action_dim)
+        self.critic = nn.Linear(hidden, 1)
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = torch.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = torch.relu(self.fc3(x))
+        policy = torch.softmax(self.actor(x), dim=-1)  # probabilities
+        value = self.critic(x)
+        return policy, value
+
+# ActorCritic wrapper that exposes policy(state, greedy=False) -> int action
+class ActorCriticAgentWrapper:
+    def __init__(self, model_path, state_dim=6, action_dim=2, device=None):
+        self.device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+        # load checkpoint
+        ckpt = torch.load(model_path, map_location=self.device)
+        state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+        # try to infer dims
+        sdim = ckpt.get("state_dim", state_dim) if isinstance(ckpt, dict) else state_dim
+        adim = action_dim
+        try:
+            if isinstance(state_dict, dict):
+                # some checkpoints might store 'actor.weight' or 'actor.weight'
+                # infer action dim from actor weight row
+                if "actor.weight" in state_dict:
+                    adim = state_dict["actor.weight"].shape[0]
+        except Exception:
+            pass
+        self.net = ActorCriticNet(state_dim=sdim, action_dim=adim).to(self.device)
+        # try to load directly, else try stripping common prefixes
+        try:
+            self.net.load_state_dict(state_dict)
+        except Exception:
+            # try to strip "net." or "module." prefixes
+            new_sd = {}
+            try:
+                for k, v in state_dict.items():
+                    nk = k
+                    if k.startswith("net."):
+                        nk = nk[len("net."):]
+                    if k.startswith("module."):
+                        nk = nk[len("module."):]
+                    new_sd[nk] = v
+                self.net.load_state_dict(new_sd)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load AC checkpoint: {e}")
+        self.net.eval()
+
+    def policy(self, state, greedy=False):
+        st = _normalize_state_for_agent(state)
+        t = torch.tensor(st, dtype=torch.float32, device=self.net.fc1.weight.device).unsqueeze(0)
+        with torch.no_grad():
+            probs, _ = self.net(t)
+        probs = probs.cpu().squeeze(0)
+        if greedy:
+            return int(torch.argmax(probs).item())
+        dist = torch.distributions.Categorical(probs)
+        return int(dist.sample().item())
+
+# Tabular agent pickle loader
+def _load_tabular_agent_pickle(path):
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+# Simple discretizer and stubs used so pickles saved from notebooks can be unpickled
+def discretize_state(state):
+    cap, onboard, station_idx, direction, hour, minute = state
+    cap_bin = min(int(cap // 100), 20)
+    on_bin = min(int(onboard // 50), 10)
+    dir_bin = 1 if direction >= 0 else 0
+    time_minutes = hour * 60 + minute
+    operating_start = 4 * 60
+    minutes_since_start = max(0, time_minutes - operating_start)
+    time_period = min(int(minutes_since_start // 180), 5)
+    return (cap_bin, on_bin, int(station_idx), dir_bin, time_period)
+
+class MonteCarloAgent:
+    """Stub for unpickling MonteCarloAgent instances."""
+    def __init__(self, n_actions=2, eps=0.1, gamma=0.99):
+        self.n_actions = n_actions
+        self.eps = eps
+        self.gamma = gamma
+        self.Q = {}
+        self.returns = {}
+
+    def policy(self, state, greedy=False):
+        ds = discretize_state(state)
+        qvals = [self.Q.get((ds, a), 0.0) for a in range(self.n_actions)]
+        if (not greedy) and (hasattr(self, "eps") and random.random() < self.eps):
+            return random.randint(0, self.n_actions - 1)
+        if all(q == 0 for q in qvals):
+            return random.randint(0, self.n_actions - 1)
+        return int(np.argmax(qvals))
+
+class QLearningAgent:
+    """Stub for unpickling QLearningAgent instances."""
+    def __init__(self, n_actions=2, alpha=0.1, gamma=0.99, eps=0.1):
+        self.n_actions = n_actions
+        self.alpha = alpha
+        self.gamma = gamma
+        self.eps = eps
+        self.Q = {}
+
+    def policy(self, state, greedy=False):
+        ds = discretize_state(state)
+        qvals = [self.Q.get((ds, a), 0.0) for a in range(self.n_actions)]
+        if (not greedy) and (hasattr(self, "eps") and random.random() < self.eps):
+            return random.randint(0, self.n_actions - 1)
+        if all(q == 0 for q in qvals):
+            return random.randint(0, self.n_actions - 1)
+        return int(np.argmax(qvals))
+
+# Simple deterministic fallback agent
+class SimpleRuleAgent:
+    def __init__(self):
+        self.n_actions = 2
+
+    def select_action(self, state, greedy=True):
+        cap, onboard, *_ = state
+        cap = max(1.0, float(cap))
+        load = float(onboard) / cap
+        if load > 0.85:
+            return 0
+        if load > 0.5:
+            return 1
+        return 1
+
+    def policy(self, state, greedy=False):
+        return self.select_action(state, greedy=greedy)
+
+# Load saved agents into LOADED_AGENTS
+def load_saved_agents(save_dir=SAVE_DIR):
+    global LOADED_AGENTS
+    LOADED_AGENTS = {}
+
+    if not os.path.isdir(save_dir):
+        print(f"🔴 Saved agents dir not found: {save_dir}")
+        # register fallback
+        LOADED_AGENTS["SimpleRule"] = SimpleRuleAgent()
+        print("ℹ️ Registered SimpleRule fallback agent.")
+        return LOADED_AGENTS
+
+    # Actor-Critic (try common filenames)
+    ac_candidates = ["actor_critic_best_model.pt", "actor_critic.pt", "actor.pt"]
+    for ac_name in ac_candidates:
+        ac_path = os.path.join(save_dir, ac_name)
+        if os.path.isfile(ac_path):
+            try:
+                LOADED_AGENTS["Actor-Critic"] = ActorCriticAgentWrapper(ac_path)
+                print(f"✅ Loaded Actor-Critic from {ac_path}")
+                break
+            except Exception as e:
+                print(f"⚠️ Failed to load Actor-Critic from {ac_path}: {e}")
+
+    # Load tabular pickles (.pkl / .pickle)
+    for fname in os.listdir(save_dir):
+        lower = fname.lower()
+        p = os.path.join(save_dir, fname)
+        if not os.path.isfile(p):
+            continue
+        try:
+            if lower.endswith(".pkl") or lower.endswith(".pickle"):
+                agent = _load_tabular_agent_pickle(p)
+                if agent is not None:
+                    key = os.path.splitext(fname)[0]
+                    LOADED_AGENTS[key] = agent
+                    print(f"✅ Loaded tabular agent '{key}' from {p}")
+        except Exception as e:
+            print(f"⚠️ Skipping {p}: {e}")
+
+    # If nothing loaded, register fallback
+    if not LOADED_AGENTS:
+        LOADED_AGENTS["SimpleRule"] = SimpleRuleAgent()
+        print("ℹ️ No trained agents found — registered SimpleRule fallback.")
+
+    return LOADED_AGENTS
+
+def get_loaded_agent(name):
+    return LOADED_AGENTS.get(name)
+
+# Auto-load at import time
+try:
+    load_saved_agents()
+except Exception as e:
+    print(f"⚠️ Error during auto-loading agents: {e}")
+    LOADED_AGENTS["SimpleRule"] = SimpleRuleAgent()
+
+# -------------------------
+# GUI + Game Logic (unchanged, except agent_play uses get_loaded_agent first)
+# -------------------------
+from train_game_env import TrainGameEnv  # keep original import (your env file)
+
+class TrainGameApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("🚆 Train Game")
+        self.root.geometry("900x600")
+        self.root.config(bg="#202020")
+
+        self.env = TrainGameEnv(render_mode="human")
+        self.state, _ = self.env.reset()
+        self.running = False
+
+        self.show_home_screen()
+
+    # ========================
+    # SCREEN HELPERS
+    # ========================
+    def clear_screen(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+    def show_home_screen(self):
+        self.clear_screen()
+        title = tk.Label(self.root, text="🚆 TRAIN GAME", font=("Arial Black", 30), bg="#202020", fg="white")
+        title.pack(pady=60)
+
+        btn_play = tk.Button(self.root, text="Play", font=("Arial", 20), width=15, command=self.show_instructions)
+        btn_play.pack(pady=15)
+
+        btn_agent = tk.Button(self.root, text="Agent Play", font=("Arial", 20), width=15, command=self.choose_agent_screen)
+        btn_agent.pack(pady=15)
+
+        btn_leaderboard = tk.Button(self.root, text="Leaderboards", font=("Arial", 20), width=15, command=self.show_leaderboards)
+        btn_leaderboard.pack(pady=15)
+
+    def show_instructions(self):
+        self.clear_screen()
+        lbl = tk.Label(
+            self.root,
+            text=(
+                "📜 Instructions:\n\n"
+                "Manage the train’s capacity to maximize passengers without collapsing!\n"
+                "Each station move = 1 step.\n\n"
+                "Actions:\n"
+                "  [Add Carriage] → +100 capacity\n"
+                "  [Widen Carriage] → +50 capacity\n\n"
+                "Click anywhere to start."
+            ),
+            font=("Arial", 14),
+            justify="left",
+            bg="#202020",
+            fg="white",
+        )
+        lbl.pack(padx=30, pady=40)
+        self.root.bind("<Button-1>", lambda e: self.start_game())
+
+    def show_leaderboards(self):
+        self.clear_screen()
+        lbl = tk.Label(self.root, text="🏆 Leaderboards\n\n(Coming soon!)", font=("Arial", 20), bg="#202020", fg="white")
+        lbl.pack(pady=150)
+        back = tk.Button(self.root, text="Back", font=("Arial", 16), command=self.show_home_screen)
+        back.pack(pady=30)
+
+    # ========================
+    # GAME UI
+    # ========================
+    def start_game(self):
+        self.root.unbind("<Button-1>")
+        self.clear_screen()
+        self.running = True
+        self.env.reset()
+        self.build_game_ui()
+        self.update_ui()
+
+    def build_game_ui(self):
+        self.title = tk.Label(self.root, text="🚆 Train Capacity Manager", font=("Arial Black", 22), bg="#202020", fg="white")
+        self.title.pack(pady=20)
+
+        self.info_label = tk.Label(self.root, text="", font=("Consolas", 14), bg="#202020", fg="white", justify="left")
+        self.info_label.pack(pady=10)
+
+        self.canvas = tk.Canvas(self.root, width=700, height=120, bg="#303030", highlightthickness=0)
+        self.canvas.pack(pady=20)
+
+        # Station markers
+        self.station_coords = []
+        for i, st in enumerate(self.env.stations):
+            x = 80 + i * 80
+            self.canvas.create_oval(x - 5, 80 - 5, x + 5, 80 + 5, fill="white")
+            self.canvas.create_text(x, 100, text=st, fill="white", font=("Arial", 10))
+            self.station_coords.append(x)
+
+        # Train rectangle
+        self.train = self.canvas.create_rectangle(70, 60, 90, 75, fill="lightblue")
+
+        btn_frame = tk.Frame(self.root, bg="#202020")
+        btn_frame.pack(pady=20)
+
+        btn_add = tk.Button(btn_frame, text="Add Carriage (+100)", font=("Arial", 16), width=20, command=lambda: self.take_action(0))
+        btn_add.grid(row=0, column=0, padx=10)
+
+        btn_widen = tk.Button(btn_frame, text="Widen Carriage (+50)", font=("Arial", 16), width=20, command=lambda: self.take_action(1))
+        btn_widen.grid(row=0, column=1, padx=10)
+
+        btn_quit = tk.Button(self.root, text="Quit to Menu", font=("Arial", 14), command=self.return_home)
+        btn_quit.pack(pady=30)
+
+    def move_train(self):
+        """Animate train to next station position."""
+        idx = self.env.station_idx
+        if 0 <= idx < len(self.station_coords):
+            target_x = self.station_coords[idx]
+            current_coords = self.canvas.coords(self.train)
+            current_x = (current_coords[0] + current_coords[2]) / 2
+            step = 4 if target_x > current_x else -4
+            while abs(target_x - current_x) > 5:
+                self.canvas.move(self.train, step, 0)
+                self.root.update()
+                time.sleep(0.02)
+                current_coords = self.canvas.coords(self.train)
+                current_x = (current_coords[0] + current_coords[2]) / 2
+            # Snap to exact
+            dx = target_x - current_x
+            self.canvas.move(self.train, dx, 0)
+            self.root.update()
+
+    def take_action(self, action):
+        if not self.running:
+            return
+        state, reward, term, trunc, info = self.env.step(action)
+        self.move_train()
+        self.state = state
+        self.update_ui()
+        if term or trunc:
+            self.running = False
+            score, raw = self.env.final_score()
+            messagebox.showinfo("Game Over", f"{info['done_reason']}\n\nFinal Score: {score}")
+            self.return_home()
+
+    def update_ui(self):
+        s = self.env
+        info_text = (
+            f"📍 Station: {s.stations[s.station_idx]}\n"
+            f"🚋 Capacity: {s.capacity}\n"
+            f"👥 Onboard: {s.passengers_onboard}\n"
+            f"🕒 Time: {s.sim_minutes//60:02d}:{s.sim_minutes%60:02d}\n"
+            f"➡ Direction: {'Eastbound' if s.direction==1 else 'Westbound'}\n"
+            f"🏗 Config Cost: {s.total_config_cost:.1f}\n"
+            f"🎯 Total Boarded: {s.total_boarded}\n"
+            f"⚠️ Peak Inefficiency: {s.peak_inefficiency}\n"
+            f"💯 Score (raw): {s.raw_score:.1f}"
+        )
+        self.info_label.config(text=info_text)
+
+    def return_home(self):
+        try:
+            self.env.close()
+        except Exception:
+            pass
+        self.show_home_screen()
+
+    # ========================
+    # AGENT PLAY
+    # ========================
+    def choose_agent_screen(self):
+        self.clear_screen()
+        tk.Label(self.root, text="🤖 Choose an Agent", font=("Arial Black", 24), bg="#202020", fg="white").pack(pady=40)
+        btns = [
+            ("Monte Carlo", "monte_carlo_agent.pkl"),
+            ("Q-Learning", "q_learning_agent.pkl"),
+            ("Actor-Critic", "actor_critic_best_model.pt"),
+        ]
+        for name, file in btns:
+            tk.Button(
+                self.root,
+                text=name,
+                font=("Arial", 18),
+                width=18,
+                command=lambda f=file, n=name: self.agent_play(f, n),
+            ).pack(pady=10)
+        tk.Button(self.root, text="Back", font=("Arial", 16), command=self.show_home_screen).pack(pady=30)
+
+    def agent_play(self, filename, agent_name):
+        self.clear_screen()
+        tk.Label(self.root, text=f"🤖 {agent_name} Playing...", font=("Arial", 20), bg="#202020", fg="white").pack(pady=30)
+        self.canvas = tk.Canvas(self.root, width=700, height=120, bg="#303030", highlightthickness=0)
+        self.canvas.pack(pady=20)
+
+        # Station markers
+        self.station_coords = []
+        for i, st in enumerate(self.env.stations):
+            x = 80 + i * 80
+            self.canvas.create_oval(x - 5, 80 - 5, x + 5, 80 + 5, fill="white")
+            self.canvas.create_text(x, 100, text=st, fill="white", font=("Arial", 10))
+            self.station_coords.append(x)
+        self.train = self.canvas.create_rectangle(70, 60, 90, 75, fill="lightgreen")
+
+        def run_agent():
+            # run agent on a fresh env instance to mirror human play
+            env = TrainGameEnv()
+            state, _ = env.reset()
+            done = False
+
+            # Attempt to use pre-loaded agent from LOADED_AGENTS first
+            agent_obj = None
+            # Map the filename / agent_name to LOADED_AGENTS keys
+            # Prefer exact names if present
+            # Try: direct agent_name -> LOADED_AGENTS key
+            agent_obj = get_loaded_agent(agent_name) or get_loaded_agent(agent_name.replace(" ", "-"))
+            if agent_obj is None:
+                # heuristic by filename
+                lf = filename.lower()
+                if "actor" in lf:
+                    agent_obj = get_loaded_agent("Actor-Critic")
+                elif "q" in lf:
+                    # look for Q-Learning keys
+                    candidate = get_loaded_agent("Q-Learning")
+                    if candidate is None:
+                        # fallback to filename-based keys
+                        candidate = get_loaded_agent("q_learning_agent") or get_loaded_agent("q_learning")
+                    agent_obj = candidate
+                elif "monte" in lf or "mc" in lf:
+                    agent_obj = get_loaded_agent("Monte Carlo")
+                    if agent_obj is None:
+                        agent_obj = get_loaded_agent("monte_carlo_agent") or get_loaded_agent("monte_carlo")
+                # else leave None
+
+            # If preloaded agent not found, fall back to file-based loading to preserve behavior
+            policy = None
+            if agent_obj is not None:
+                # agent_obj should have .policy(state, greedy=...) -> int
+                def policy(s):
+                    try:
+                        return int(agent_obj.policy(s, greedy=True))
+                    except Exception:
+                        # older wrappers might use .select_action
+                        if hasattr(agent_obj, "select_action"):
+                            return int(agent_obj.select_action(s, greedy=True))
+                        # last resort: if agent is a raw torch model with .policy signature
+                        try:
+                            return int(agent_obj.policy(s))
+                        except Exception as e:
+                            raise
+            else:
+                # fallback: try to load directly from disk like previous behavior
+                try:
+                    saved_path = os.path.join(SAVE_DIR, filename)
+                    if filename.endswith(".pt") and os.path.isfile(saved_path):
+                        # try using the actor wrapper if possible
+                        try:
+                            wc = ActorCriticAgentWrapper(saved_path)
+                            agent_obj = wc
+                            def policy(s): return int(agent_obj.policy(s, greedy=True))
+                        except Exception:
+                            # as last-resort attempt, try torch.load and expect an object with .policy
+                            raw = torch.load(saved_path, map_location="cpu")
+                            if hasattr(raw, "policy"):
+                                def policy(s): return int(raw.policy(s, greedy=True))
+                            else:
+                                raise RuntimeError("Loaded .pt doesn't expose a .policy method.")
+                    else:
+                        # try to unpickle
+                        p = saved_path
+                        if os.path.isfile(p):
+                            with open(p, "rb") as f:
+                                pick = pickle.load(f)
+                            if hasattr(pick, "policy"):
+                                def policy(s): return int(pick.policy(s, greedy=True))
+                            elif hasattr(pick, "select_action"):
+                                def policy(s): return int(pick.select_action(s, greedy=True))
+                            else:
+                                raise RuntimeError("Pickle loaded but no policy/select_action on object.")
+                        else:
+                            raise FileNotFoundError(f"Agent file not found: {saved_path}")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to load agent: {e}")
+                    self.show_home_screen()
+                    return
+
+            # Run agent loop
+            while not done:
+                try:
+                    action = policy(state)
+                except Exception as e:
+                    messagebox.showerror("Error", f"Agent policy error: {e}")
+                    break
+                state, reward, term, trunc, info = env.step(action)
+                # sync GUI visible env state for train movement
+                try:
+                    self.env.station_idx = env.station_idx
+                except Exception:
+                    pass
+                self.move_train()
+                done = term or trunc
+                time.sleep(0.5)
+
+            score, raw = env.final_score()
+            messagebox.showinfo("Agent Finished", f"{agent_name} Score: {score}")
+            self.show_home_screen()
+
+        threading.Thread(target=run_agent, daemon=True).start()
+
+
+# ===============================
+# MAIN
+# ===============================
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TrainGameApp(root)
+    root.mainloop()
