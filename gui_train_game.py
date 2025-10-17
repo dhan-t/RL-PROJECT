@@ -1,4 +1,5 @@
 # gui_train_game.py
+from train_game_env import TrainGameEnv  # keep original import (your env file)
 import os
 import random
 import threading
@@ -11,14 +12,22 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+# New: reproducibility constants
+DEFAULT_SEED = 42
+# seconds between agent steps (slower UI but deterministic)
+AGENT_STEP_DELAY = 0.3
+
 # -------------------------
 # Agent loading system (auto-loads on import)
 # -------------------------
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 SAVE_DIR = os.path.join(BASE_DIR, "saved_agents")
-LOADED_AGENTS = {}  # name -> agent-like object exposing .policy(state, greedy=False)
+# name -> agent-like object exposing .policy(state, greedy=False)
+LOADED_AGENTS = {}
 
 # Normalization used at training time (keep consistent with rl_training.ipynb)
+
+
 def _normalize_state_for_agent(state):
     cap, onboard, station_idx, direction, hour, minute = state
     return np.array([
@@ -31,6 +40,8 @@ def _normalize_state_for_agent(state):
     ], dtype=np.float32)
 
 # Recreate the network architecture used in training so we can load state_dict
+
+
 class ActorCriticNet(nn.Module):
     def __init__(self, state_dim=6, action_dim=2, hidden=128):
         super().__init__()
@@ -52,14 +63,18 @@ class ActorCriticNet(nn.Module):
         return policy, value
 
 # ActorCritic wrapper that exposes policy(state, greedy=False) -> int action
+
 class ActorCriticAgentWrapper:
     def __init__(self, model_path, state_dim=6, action_dim=2, device=None):
-        self.device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+        self.device = device or (torch.device(
+            "cuda") if torch.cuda.is_available() else torch.device("cpu"))
         # load checkpoint
         ckpt = torch.load(model_path, map_location=self.device)
-        state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+        state_dict = ckpt.get("model_state_dict", ckpt) if isinstance(
+            ckpt, dict) else ckpt
         # try to infer dims
-        sdim = ckpt.get("state_dim", state_dim) if isinstance(ckpt, dict) else state_dim
+        sdim = ckpt.get("state_dim", state_dim) if isinstance(
+            ckpt, dict) else state_dim
         adim = action_dim
         try:
             if isinstance(state_dict, dict):
@@ -69,7 +84,8 @@ class ActorCriticAgentWrapper:
                     adim = state_dict["actor.weight"].shape[0]
         except Exception:
             pass
-        self.net = ActorCriticNet(state_dim=sdim, action_dim=adim).to(self.device)
+        self.net = ActorCriticNet(
+            state_dim=sdim, action_dim=adim).to(self.device)
         # try to load directly, else try stripping common prefixes
         try:
             self.net.load_state_dict(state_dict)
@@ -91,7 +107,8 @@ class ActorCriticAgentWrapper:
 
     def policy(self, state, greedy=False):
         st = _normalize_state_for_agent(state)
-        t = torch.tensor(st, dtype=torch.float32, device=self.net.fc1.weight.device).unsqueeze(0)
+        t = torch.tensor(st, dtype=torch.float32,
+                         device=self.net.fc1.weight.device).unsqueeze(0)
         with torch.no_grad():
             probs, _ = self.net(t)
         probs = probs.cpu().squeeze(0)
@@ -101,11 +118,15 @@ class ActorCriticAgentWrapper:
         return int(dist.sample().item())
 
 # Tabular agent pickle loader
+
+
 def _load_tabular_agent_pickle(path):
     with open(path, "rb") as f:
         return pickle.load(f)
 
 # Simple discretizer and stubs used so pickles saved from notebooks can be unpickled
+
+
 def discretize_state(state):
     cap, onboard, station_idx, direction, hour, minute = state
     cap_bin = min(int(cap // 100), 20)
@@ -117,8 +138,10 @@ def discretize_state(state):
     time_period = min(int(minutes_since_start // 180), 5)
     return (cap_bin, on_bin, int(station_idx), dir_bin, time_period)
 
+
 class MonteCarloAgent:
     """Stub for unpickling MonteCarloAgent instances."""
+
     def __init__(self, n_actions=2, eps=0.1, gamma=0.99):
         self.n_actions = n_actions
         self.eps = eps
@@ -135,8 +158,10 @@ class MonteCarloAgent:
             return random.randint(0, self.n_actions - 1)
         return int(np.argmax(qvals))
 
+
 class QLearningAgent:
     """Stub for unpickling QLearningAgent instances."""
+
     def __init__(self, n_actions=2, alpha=0.1, gamma=0.99, eps=0.1):
         self.n_actions = n_actions
         self.alpha = alpha
@@ -154,6 +179,8 @@ class QLearningAgent:
         return int(np.argmax(qvals))
 
 # Simple deterministic fallback agent
+
+
 class SimpleRuleAgent:
     def __init__(self):
         self.n_actions = 2
@@ -172,6 +199,8 @@ class SimpleRuleAgent:
         return self.select_action(state, greedy=greedy)
 
 # Load saved agents into LOADED_AGENTS
+
+
 def load_saved_agents(save_dir=SAVE_DIR):
     global LOADED_AGENTS
     LOADED_AGENTS = {}
@@ -184,12 +213,14 @@ def load_saved_agents(save_dir=SAVE_DIR):
         return LOADED_AGENTS
 
     # Actor-Critic (try common filenames)
-    ac_candidates = ["actor_critic_best_model.pt", "actor_critic.pt", "actor.pt"]
+    ac_candidates = ["actor_critic_best_model.pt",
+        "actor_critic.pt", "actor.pt"]
     for ac_name in ac_candidates:
         ac_path = os.path.join(save_dir, ac_name)
         if os.path.isfile(ac_path):
             try:
-                LOADED_AGENTS["Actor-Critic"] = ActorCriticAgentWrapper(ac_path)
+                LOADED_AGENTS["Actor-Critic"] = ActorCriticAgentWrapper(
+                    ac_path)
                 print(f"✅ Loaded Actor-Critic from {ac_path}")
                 break
             except Exception as e:
@@ -218,8 +249,10 @@ def load_saved_agents(save_dir=SAVE_DIR):
 
     return LOADED_AGENTS
 
+
 def get_loaded_agent(name):
     return LOADED_AGENTS.get(name)
+
 
 # Auto-load at import time
 try:
@@ -231,7 +264,7 @@ except Exception as e:
 # -------------------------
 # GUI + Game Logic (unchanged, except agent_play uses get_loaded_agent first)
 # -------------------------
-from train_game_env import TrainGameEnv  # keep original import (your env file)
+
 
 class TrainGameApp:
     def __init__(self, root):
@@ -240,7 +273,16 @@ class TrainGameApp:
         self.root.geometry("900x600")
         self.root.config(bg="#202020")
 
-        self.env = TrainGameEnv(render_mode="human")
+        # Initialize env with fixed seed for reproducibility (matches CLI runs)
+        try:
+            self.env = TrainGameEnv(seed=DEFAULT_SEED)
+        except TypeError:
+            # If env doesn't accept `seed` kwarg, create normally and seed RNGs globally
+            self.env = TrainGameEnv()
+            random.seed(DEFAULT_SEED)
+            np.random.seed(DEFAULT_SEED)
+            torch.manual_seed(DEFAULT_SEED)
+
         self.state, _ = self.env.reset()
         self.running = False
 
@@ -255,16 +297,20 @@ class TrainGameApp:
 
     def show_home_screen(self):
         self.clear_screen()
-        title = tk.Label(self.root, text="🚆 TRAIN GAME", font=("Arial Black", 30), bg="#202020", fg="white")
+        title = tk.Label(self.root, text="🚆 TRAIN GAME", font=(
+            "Arial Black", 30), bg="#202020", fg="white")
         title.pack(pady=60)
 
-        btn_play = tk.Button(self.root, text="Play", font=("Arial", 20), width=15, command=self.show_instructions)
+        btn_play = tk.Button(self.root, text="Play", font=(
+            "Arial", 20), width=15, command=self.show_instructions)
         btn_play.pack(pady=15)
 
-        btn_agent = tk.Button(self.root, text="Agent Play", font=("Arial", 20), width=15, command=self.choose_agent_screen)
+        btn_agent = tk.Button(self.root, text="Agent Play", font=(
+            "Arial", 20), width=15, command=self.choose_agent_screen)
         btn_agent.pack(pady=15)
 
-        btn_leaderboard = tk.Button(self.root, text="Leaderboards", font=("Arial", 20), width=15, command=self.show_leaderboards)
+        btn_leaderboard = tk.Button(self.root, text="Leaderboards", font=(
+            "Arial", 20), width=15, command=self.show_leaderboards)
         btn_leaderboard.pack(pady=15)
 
     def show_instructions(self):
@@ -290,9 +336,11 @@ class TrainGameApp:
 
     def show_leaderboards(self):
         self.clear_screen()
-        lbl = tk.Label(self.root, text="🏆 Leaderboards\n\n(Coming soon!)", font=("Arial", 20), bg="#202020", fg="white")
+        lbl = tk.Label(self.root, text="🏆 Leaderboards\n\n(Coming soon!)", font=(
+            "Arial", 20), bg="#202020", fg="white")
         lbl.pack(pady=150)
-        back = tk.Button(self.root, text="Back", font=("Arial", 16), command=self.show_home_screen)
+        back = tk.Button(self.root, text="Back", font=(
+            "Arial", 16), command=self.show_home_screen)
         back.pack(pady=30)
 
     # ========================
@@ -307,13 +355,16 @@ class TrainGameApp:
         self.update_ui()
 
     def build_game_ui(self):
-        self.title = tk.Label(self.root, text="🚆 Train Capacity Manager", font=("Arial Black", 22), bg="#202020", fg="white")
+        self.title = tk.Label(self.root, text="🚆 Train Capacity Manager", font=(
+            "Arial Black", 22), bg="#202020", fg="white")
         self.title.pack(pady=20)
 
-        self.info_label = tk.Label(self.root, text="", font=("Consolas", 14), bg="#202020", fg="white", justify="left")
+        self.info_label = tk.Label(self.root, text="", font=(
+            "Consolas", 14), bg="#202020", fg="white", justify="left")
         self.info_label.pack(pady=10)
 
-        self.canvas = tk.Canvas(self.root, width=700, height=120, bg="#303030", highlightthickness=0)
+        self.canvas = tk.Canvas(self.root, width=700,
+                                height=120, bg="#303030", highlightthickness=0)
         self.canvas.pack(pady=20)
 
         # Station markers
@@ -321,22 +372,27 @@ class TrainGameApp:
         for i, st in enumerate(self.env.stations):
             x = 80 + i * 80
             self.canvas.create_oval(x - 5, 80 - 5, x + 5, 80 + 5, fill="white")
-            self.canvas.create_text(x, 100, text=st, fill="white", font=("Arial", 10))
+            self.canvas.create_text(
+                x, 100, text=st, fill="white", font=("Arial", 10))
             self.station_coords.append(x)
 
         # Train rectangle
-        self.train = self.canvas.create_rectangle(70, 60, 90, 75, fill="lightblue")
+        self.train = self.canvas.create_rectangle(
+            70, 60, 90, 75, fill="lightblue")
 
         btn_frame = tk.Frame(self.root, bg="#202020")
         btn_frame.pack(pady=20)
 
-        btn_add = tk.Button(btn_frame, text="Add Carriage (+100)", font=("Arial", 16), width=20, command=lambda: self.take_action(0))
+        btn_add = tk.Button(btn_frame, text="Add Carriage (+100)",
+                            font=("Arial", 16), width=20, command=lambda: self.take_action(0))
         btn_add.grid(row=0, column=0, padx=10)
 
-        btn_widen = tk.Button(btn_frame, text="Widen Carriage (+50)", font=("Arial", 16), width=20, command=lambda: self.take_action(1))
+        btn_widen = tk.Button(btn_frame, text="Widen Carriage (+50)",
+                              font=("Arial", 16), width=20, command=lambda: self.take_action(1))
         btn_widen.grid(row=0, column=1, padx=10)
 
-        btn_quit = tk.Button(self.root, text="Quit to Menu", font=("Arial", 14), command=self.return_home)
+        btn_quit = tk.Button(self.root, text="Quit to Menu", font=(
+            "Arial", 14), command=self.return_home)
         btn_quit.pack(pady=30)
 
     def move_train(self):
@@ -368,7 +424,8 @@ class TrainGameApp:
         if term or trunc:
             self.running = False
             score, raw = self.env.final_score()
-            messagebox.showinfo("Game Over", f"{info['done_reason']}\n\nFinal Score: {score}")
+            messagebox.showinfo(
+                "Game Over", f"{info['done_reason']}\n\nFinal Score: {score}")
             self.return_home()
 
     def update_ui(self):
@@ -377,8 +434,8 @@ class TrainGameApp:
             f"📍 Station: {s.stations[s.station_idx]}\n"
             f"🚋 Capacity: {s.capacity}\n"
             f"👥 Onboard: {s.passengers_onboard}\n"
-            f"🕒 Time: {s.sim_minutes//60:02d}:{s.sim_minutes%60:02d}\n"
-            f"➡ Direction: {'Eastbound' if s.direction==1 else 'Westbound'}\n"
+            f"🕒 Time: {s.sim_minutes//60:02d}:{s.sim_minutes % 60:02d}\n"
+            f"➡ Direction: {'Eastbound' if s.direction == 1 else 'Westbound'}\n"
             f"🏗 Config Cost: {s.total_config_cost:.1f}\n"
             f"🎯 Total Boarded: {s.total_boarded}\n"
             f"⚠️ Peak Inefficiency: {s.peak_inefficiency}\n"
@@ -398,7 +455,8 @@ class TrainGameApp:
     # ========================
     def choose_agent_screen(self):
         self.clear_screen()
-        tk.Label(self.root, text="🤖 Choose an Agent", font=("Arial Black", 24), bg="#202020", fg="white").pack(pady=40)
+        tk.Label(self.root, text="🤖 Choose an Agent", font=(
+            "Arial Black", 24), bg="#202020", fg="white").pack(pady=40)
         btns = [
             ("Monte Carlo", "monte_carlo_agent.pkl"),
             ("Q-Learning", "q_learning_agent.pkl"),
@@ -412,125 +470,221 @@ class TrainGameApp:
                 width=18,
                 command=lambda f=file, n=name: self.agent_play(f, n),
             ).pack(pady=10)
-        tk.Button(self.root, text="Back", font=("Arial", 16), command=self.show_home_screen).pack(pady=30)
+        tk.Button(self.root, text="Back", font=("Arial", 16),
+                  command=self.show_home_screen).pack(pady=30)
 
     def agent_play(self, filename, agent_name):
         self.clear_screen()
-        tk.Label(self.root, text=f"🤖 {agent_name} Playing...", font=("Arial", 20), bg="#202020", fg="white").pack(pady=30)
-        self.canvas = tk.Canvas(self.root, width=700, height=120, bg="#303030", highlightthickness=0)
-        self.canvas.pack(pady=20)
+        tk.Label(self.root, text=f"🤖 {agent_name} Playing...", font=(
+            "Arial", 20), bg="#202020", fg="white").pack(pady=20)
 
-        # Station markers
+        # Main info area (same stats as player screen)
+        info_frame = tk.Frame(self.root, bg="#202020")
+        info_frame.pack(pady=6)
+        agent_info_label = tk.Label(info_frame, text="", font=(
+            "Consolas", 12), bg="#202020", fg="white", justify="left")
+        agent_info_label.pack()
+
+        # Canvas for train / stations (same as player)
+        self.canvas = tk.Canvas(self.root, width=700,
+                                height=120, bg="#303030", highlightthickness=0)
+        self.canvas.pack(pady=10)
+
+        # Station markers & coords
         self.station_coords = []
         for i, st in enumerate(self.env.stations):
             x = 80 + i * 80
             self.canvas.create_oval(x - 5, 80 - 5, x + 5, 80 + 5, fill="white")
-            self.canvas.create_text(x, 100, text=st, fill="white", font=("Arial", 10))
+            self.canvas.create_text(
+                x, 100, text=st, fill="white", font=("Arial", 10))
             self.station_coords.append(x)
-        self.train = self.canvas.create_rectangle(70, 60, 90, 75, fill="lightgreen")
+        self.train = self.canvas.create_rectangle(
+            70, 60, 90, 75, fill="lightgreen")
+
+        # Right-side panel: action history list and controls
+        right_frame = tk.Frame(self.root, bg="#202020")
+        right_frame.pack(pady=8)
+
+        tk.Label(right_frame, text="Agent Action History", font=(
+            "Arial", 14), bg="#202020", fg="white").pack(pady=(0, 6))
+        actions_frame = tk.Frame(right_frame, bg="#202020")
+        actions_frame.pack()
+
+        actions_scroll = tk.Scrollbar(actions_frame, orient=tk.VERTICAL)
+        actions_listbox = tk.Listbox(
+            actions_frame, width=40, height=12, yscrollcommand=actions_scroll.set, font=("Consolas", 10))
+        actions_scroll.config(command=actions_listbox.yview)
+        actions_listbox.pack(side=tk.LEFT, fill=tk.BOTH)
+        actions_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Return button
+        tk.Button(self.root, text="Back to Menu", font=("Arial", 14),
+                  command=self.show_home_screen).pack(pady=12)
+
+        action_names = {0: "Add Carriage (+100)", 1: "Widen Carriage (+50)"}
+
+        def update_agent_ui(env_obj, info=None, action_taken=None):
+            # Build same stats text as update_ui uses
+            s = env_obj
+            info_text = (
+                f"📍 Station: {s.stations[s.station_idx]}\n"
+                f"🚋 Capacity: {s.capacity}\n"
+                f"👥 Onboard: {s.passengers_onboard}\n"
+                f"🕒 Time: {s.sim_minutes//60:02d}:{s.sim_minutes % 60:02d}\n"
+                f"➡ Direction: {'Eastbound' if s.direction == 1 else 'Westbound'}\n"
+                f"🏗 Config Cost: {s.total_config_cost:.1f}\n"
+                f"🎯 Total Boarded: {s.total_boarded}\n"
+                f"⚠️ Peak Inefficiency: {s.peak_inefficiency}\n"
+                f"💯 Score (raw): {s.raw_score:.1f}"
+            )
+            agent_info_label.config(text=info_text)
+            if action_taken is not None:
+                ts = time.strftime("%H:%M:%S")
+                actions_listbox.insert(
+                    tk.END, f"[{ts}] {action_names.get(action_taken, str(action_taken))}")
+                actions_listbox.yview_moveto(1.0)
+
+            # sync main app train position so move_train animates correctly
+            try:
+                self.env.station_idx = env_obj.station_idx
+            except Exception:
+                pass
 
         def run_agent():
-            # run agent on a fresh env instance to mirror human play
-            env = TrainGameEnv()
+            # Ensure deterministic RNGs for this run (match CLI notebook)
+            random.seed(DEFAULT_SEED)
+            np.random.seed(DEFAULT_SEED)
+            torch.manual_seed(DEFAULT_SEED)
+
+            # Create a fresh, seeded environment for agent evaluation
+            try:
+                env = TrainGameEnv(seed=DEFAULT_SEED)
+            except TypeError:
+                env = TrainGameEnv()
             state, _ = env.reset()
-            done = False
 
-            # Attempt to use pre-loaded agent from LOADED_AGENTS first
+               # initial UI update
+            self.root.after(0, lambda: update_agent_ui(
+                   env, action_taken=None))
+
+                # get / build policy (same heuristics as before)
             agent_obj = None
-            # Map the filename / agent_name to LOADED_AGENTS keys
-            # Prefer exact names if present
-            # Try: direct agent_name -> LOADED_AGENTS key
-            agent_obj = get_loaded_agent(agent_name) or get_loaded_agent(agent_name.replace(" ", "-"))
+            agent_obj = get_loaded_agent(agent_name) or get_loaded_agent(
+                    agent_name.replace(" ", "-"))
             if agent_obj is None:
-                # heuristic by filename
-                lf = filename.lower()
-                if "actor" in lf:
-                    agent_obj = get_loaded_agent("Actor-Critic")
-                elif "q" in lf:
-                    # look for Q-Learning keys
-                    candidate = get_loaded_agent("Q-Learning")
-                    if candidate is None:
-                        # fallback to filename-based keys
-                        candidate = get_loaded_agent("q_learning_agent") or get_loaded_agent("q_learning")
-                    agent_obj = candidate
-                elif "monte" in lf or "mc" in lf:
-                    agent_obj = get_loaded_agent("Monte Carlo")
-                    if agent_obj is None:
-                        agent_obj = get_loaded_agent("monte_carlo_agent") or get_loaded_agent("monte_carlo")
-                # else leave None
+                    lf = filename.lower()
+                    if "actor" in lf:
+                        agent_obj = get_loaded_agent("Actor-Critic")
+                    elif "q" in lf:
+                        agent_obj = get_loaded_agent(
+                            "Q-Learning") or get_loaded_agent("q_learning_agent") or get_loaded_agent("q_learning")
+                    elif "monte" in lf or "mc" in lf:
+                        agent_obj = get_loaded_agent("Monte Carlo") or get_loaded_agent(
+                            "monte_carlo_agent") or get_loaded_agent("monte_carlo")
 
-            # If preloaded agent not found, fall back to file-based loading to preserve behavior
+            # Force neural agents into eval mode (disable dropout/noise)
+        
+            try:
+                if hasattr(agent_obj, "net"):
+                    agent_obj.net.eval()
+            except Exception:
+                pass
+
+            # Always use greedy policy for evaluation to be deterministic
             policy = None
             if agent_obj is not None:
-                # agent_obj should have .policy(state, greedy=...) -> int
-                def policy(s):
-                    try:
-                        return int(agent_obj.policy(s, greedy=True))
-                    except Exception:
-                        # older wrappers might use .select_action
-                        if hasattr(agent_obj, "select_action"):
-                            return int(agent_obj.select_action(s, greedy=True))
-                        # last resort: if agent is a raw torch model with .policy signature
+                    def policy(s):
+                        # Normalize/greedy handled by wrappers/policies; enforce greedy everywhere
                         try:
-                            return int(agent_obj.policy(s))
-                        except Exception as e:
-                            raise
-            else:
-                # fallback: try to load directly from disk like previous behavior
-                try:
-                    saved_path = os.path.join(SAVE_DIR, filename)
-                    if filename.endswith(".pt") and os.path.isfile(saved_path):
-                        # try using the actor wrapper if possible
-                        try:
-                            wc = ActorCriticAgentWrapper(saved_path)
-                            agent_obj = wc
-                            def policy(s): return int(agent_obj.policy(s, greedy=True))
+                            return int(agent_obj.policy(s, greedy=True))
                         except Exception:
-                            # as last-resort attempt, try torch.load and expect an object with .policy
-                            raw = torch.load(saved_path, map_location="cpu")
-                            if hasattr(raw, "policy"):
-                                def policy(s): return int(raw.policy(s, greedy=True))
-                            else:
-                                raise RuntimeError("Loaded .pt doesn't expose a .policy method.")
-                    else:
-                        # try to unpickle
-                        p = saved_path
-                        if os.path.isfile(p):
-                            with open(p, "rb") as f:
-                                pick = pickle.load(f)
-                            if hasattr(pick, "policy"):
-                                def policy(s): return int(pick.policy(s, greedy=True))
-                            elif hasattr(pick, "select_action"):
-                                def policy(s): return int(pick.select_action(s, greedy=True))
-                            else:
-                                raise RuntimeError("Pickle loaded but no policy/select_action on object.")
-                        else:
-                            raise FileNotFoundError(f"Agent file not found: {saved_path}")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to load agent: {e}")
-                    self.show_home_screen()
-                    return
+                            if hasattr(agent_obj, "select_action"):
+                                return int(agent_obj.select_action(s, greedy=True))
+                            raise
 
-            # Run agent loop
+            else:
+                    # fallback disk loading (unchanged)
+                    try:
+                        saved_path = os.path.join(SAVE_DIR, filename)
+                        if filename.endswith(".pt") and os.path.isfile(saved_path):
+                            wc = ActorCriticAgentWrapper(saved_path)
+                            agent_obj_local = wc
+                            # enforce greedy eval
+                            agent_obj_local.net.eval()
+                            def policy(s): return int(
+                                agent_obj_local.policy(s, greedy=True))
+                        else:
+                            p = saved_path
+                            if os.path.isfile(p):
+                                with open(p, "rb") as f:
+                                    pick = pickle.load(f)
+                                if hasattr(pick, "policy"):
+                                    def policy(s): return int(
+                                        pick.policy(s, greedy=True))
+                                elif hasattr(pick, "select_action"):
+                                    def policy(s): return int(
+                                        pick.select_action(s, greedy=True))
+                                else:
+                                    raise RuntimeError(
+                                        "Pickle loaded but no policy/select_action found.")
+                            else:
+                                raise FileNotFoundError(
+                                    f"Agent file not found: {saved_path}")
+                    except Exception as e:
+                        self.root.after(0, lambda: messagebox.showerror(
+                            "Error", f"Failed to load agent: {e}"))
+                        self.root.after(0, self.show_home_screen)
+                        return
+
+            # Run deterministic evaluation loop mirroring CLI timing/logic
+            done = False
+            step_idx = 0
+            total_reward_acc = 0.0
+            print(
+                f"\n=== AGENT RUN START: {agent_name} (seed={DEFAULT_SEED}) ===")
             while not done:
                 try:
                     action = policy(state)
                 except Exception as e:
-                    messagebox.showerror("Error", f"Agent policy error: {e}")
+                    self.root.after(0, lambda: messagebox.showerror(
+                        "Error", f"Agent policy error: {e}"))
                     break
+
+                # perform step
                 state, reward, term, trunc, info = env.step(action)
-                # sync GUI visible env state for train movement
-                try:
-                    self.env.station_idx = env.station_idx
-                except Exception:
-                    pass
-                self.move_train()
+                step_idx += 1
+                total_reward_acc += float(reward)
+
+                # schedule UI update + animation on main thread
+                self.root.after(0, lambda env_obj=env, act=action: update_agent_ui(
+                    env_obj, action_taken=act))
+                self.root.after(0, self.move_train)
+
                 done = term or trunc
-                time.sleep(0.5)
+
+                # CLI-style log per step for reproducibility comparison
+                try:
+                    boarded = info.get("boarded", 0)
+                    alighted = info.get("alighted", 0)
+                    eff = info.get("efficiency_ratio", 0)
+                except Exception:
+                    boarded = alighted = eff = 0
+                print(f"Step {step_idx:03d} | Action: {action_names.get(action, action)} | Reward: {reward:.2f} | Boarded: {boarded} | Alighted: {alighted} | Capacity: {env.capacity} | Eff: {eff}")
+
+                time.sleep(AGENT_STEP_DELAY)
 
             score, raw = env.final_score()
-            messagebox.showinfo("Agent Finished", f"{agent_name} Score: {score}")
-            self.show_home_screen()
+            # CLI-style summary (same as notebook)
+            print("\n" + "="*60)
+            print(f"AGENT FINISHED: {agent_name}")
+            print(f"Final Score: {score} / 100")
+            print(f"Raw Score: {raw:.2f}")
+            print(f"Total Reward (accumulated): {total_reward_acc:.2f}")
+            print("="*60 + "\n")
+
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Agent Finished", f"{agent_name} Score: {score}"))
+            self.root.after(0, self.show_home_screen)
 
         threading.Thread(target=run_agent, daemon=True).start()
 
