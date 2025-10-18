@@ -26,7 +26,7 @@ class TrainGameEnv:
     
     metadata = {'render_modes': ['human'], 'render_fps': 2}
     
-    def __init__(self, initial_capacity=100, seed=None, verbose=False, render_mode=None):
+    def __init__(self, initial_capacity=50, seed=None, verbose=False, render_mode=None):
         super().__init__()
         
         # Seeding
@@ -41,7 +41,7 @@ class TrainGameEnv:
         self.initial_capacity = initial_capacity
         
         # Define Gymnasium spaces (MUST be attributes, not properties)
-        self.action_space = spaces.Discrete(2)  # 0: Add, 1: Widen
+        self.action_space = spaces.Discrete(3)  # 0: Add, 1: Widen, 2: No Action
         self.observation_space = spaces.Box(
             low=np.array([0, 0, 0, -1, 0, 0], dtype=np.float32),
             high=np.array([np.inf, np.inf, 12, 1, 23, 59], dtype=np.float32),
@@ -239,12 +239,14 @@ class TrainGameEnv:
         # Process capacity actions
         if action == 0:  # Add carriage (+100 capacity)
             self.capacity += 100
-            cost, weight = 10.0, 1.0
+            cost, weight = 2.0, 1.0
         elif action == 1:  # Widen carriage (+50 capacity)  
             self.capacity += 50
-            cost, weight = 5.0, 0.5
+            cost, weight = 1.0, 0.5
+        elif action == 2:  # No action (do nothing)
+            cost, weight = 0.0, 0.0
         else:
-            raise ValueError("Invalid action. Only 0 (Add carriage) and 1 (Widen carriage) are allowed.")
+            raise ValueError("Invalid action. Valid actions are 0 (Add), 1 (Winden), 2 (No Action).")
 
         # Track configuration cost (don't subtract from raw_score yet)
         self.total_config_cost += cost
@@ -278,6 +280,10 @@ class TrainGameEnv:
         boarded = min(arrivals, space)
         self.passengers_onboard += boarded
 
+        # Capacity decay: lose 2 capacity every 100 steps (gradual wear and tear)
+        if self.steps > 0 and self.steps % 100 == 0:
+            self.capacity = max(0, self.capacity - 2)
+
         unused = max(0, self.capacity - self.passengers_onboard)
         self.peak_inefficiency = max(self.peak_inefficiency, unused)
 
@@ -287,16 +293,41 @@ class TrainGameEnv:
         # Reward for boarding passengers
         reward_board = 1.5 * boarded
         
+        # Moderate penalty for missed passengers (couldn't board due to capacity)
+        missed_passengers = arrivals - boarded
+        penalty_missed = 1.0 * missed_passengers  # Balanced penalty for missed opportunities
+        
         # Penalty for unused capacity
         penalty_unused = self._calculate_efficiency_penalty(
             unused, alighted_passengers, self.previous_onboard, current_hour
         )
         
-        # Penalty for configuration changes (applied once)
-        config_penalty = 2.0 * cost
+        # Penalty for configuration changes (no multiplier - cost is already balanced)
+        config_penalty = cost
         
-        # Calculate step reward (FIX: Don't double-count cost)
-        step_reward = reward_board - penalty_unused - config_penalty
+        # BONUS: Perfect capacity matching (95-100% utilization)
+        utilization = self.passengers_onboard / max(1, self.capacity)
+        capacity_match_bonus = 0.0
+        
+        # Rush hour bonus (extra reward for good management during peak times)
+        rush_hour_multiplier = 1.0
+        if 6 <= current_hour <= 8 or 17 <= current_hour <= 19:
+            rush_hour_multiplier = 2.0  # Double bonus during rush hour
+        elif 11 <= current_hour <= 13:
+            rush_hour_multiplier = 1.5  # 1.5x bonus during lunch rush
+        
+        if 0.95 <= utilization <= 1.0:
+            # Perfect match: near-full capacity
+            capacity_match_bonus = 10.0 * rush_hour_multiplier
+        elif 0.85 <= utilization < 0.95:
+            # Good match: high utilization
+            capacity_match_bonus = 5.0 * rush_hour_multiplier
+        elif 0.70 <= utilization < 0.85:
+            # Decent match: moderate utilization
+            capacity_match_bonus = 2.0 * rush_hour_multiplier
+        
+        # Calculate step reward
+        step_reward = reward_board - penalty_unused - config_penalty - penalty_missed + capacity_match_bonus
 
         # Update game state
         self.raw_score += step_reward
@@ -335,7 +366,10 @@ class TrainGameEnv:
             'penalty_unused': penalty_unused,
             'config_penalty': config_penalty,
             'efficiency_ratio': alighted_passengers / max(1, self.previous_onboard),
-            'step_reward': step_reward
+            'step_reward': step_reward,
+            'utilization': utilization,
+            'capacity_match_bonus': capacity_match_bonus,
+            'rush_hour_multiplier': rush_hour_multiplier
         })
 
         # Return standard Gymnasium 5-tuple (FIX: removed double cost subtraction)
