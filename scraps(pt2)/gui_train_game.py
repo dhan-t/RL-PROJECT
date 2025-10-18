@@ -43,7 +43,7 @@ def _normalize_state_for_agent(state):
 
 
 class ActorCriticNet(nn.Module):
-    def __init__(self, state_dim=6, action_dim=2, hidden=128):
+    def __init__(self, state_dim=6, action_dim=3, hidden=128):
         super().__init__()
         self.fc1 = nn.Linear(state_dim, hidden)
         self.fc2 = nn.Linear(hidden, hidden)
@@ -65,7 +65,7 @@ class ActorCriticNet(nn.Module):
 # ActorCritic wrapper that exposes policy(state, greedy=False) -> int action
 
 class ActorCriticAgentWrapper:
-    def __init__(self, model_path, state_dim=6, action_dim=2, device=None):
+    def __init__(self, model_path, state_dim=6, action_dim=3, device=None):
         self.device = device or (torch.device(
             "cuda") if torch.cuda.is_available() else torch.device("cpu"))
         # load checkpoint
@@ -142,7 +142,7 @@ def discretize_state(state):
 class MonteCarloAgent:
     """Stub for unpickling MonteCarloAgent instances."""
 
-    def __init__(self, n_actions=2, eps=0.1, gamma=0.99):
+    def __init__(self, n_actions=3, eps=0.1, gamma=0.99):
         self.n_actions = n_actions
         self.eps = eps
         self.gamma = gamma
@@ -155,14 +155,14 @@ class MonteCarloAgent:
         if (not greedy) and (hasattr(self, "eps") and random.random() < self.eps):
             return random.randint(0, self.n_actions - 1)
         if all(q == 0 for q in qvals):
-            return random.randint(0, self.n_actions - 1)
+            return 2  # Prefer no action when no Q-values
         return int(np.argmax(qvals))
 
 
 class QLearningAgent:
     """Stub for unpickling QLearningAgent instances."""
 
-    def __init__(self, n_actions=2, alpha=0.1, gamma=0.99, eps=0.1):
+    def __init__(self, n_actions=3, alpha=0.1, gamma=0.99, eps=0.1):
         self.n_actions = n_actions
         self.alpha = alpha
         self.gamma = gamma
@@ -175,7 +175,7 @@ class QLearningAgent:
         if (not greedy) and (hasattr(self, "eps") and random.random() < self.eps):
             return random.randint(0, self.n_actions - 1)
         if all(q == 0 for q in qvals):
-            return random.randint(0, self.n_actions - 1)
+            return 2  # Prefer no action when no Q-values
         return int(np.argmax(qvals))
 
 # Simple deterministic fallback agent
@@ -183,17 +183,17 @@ class QLearningAgent:
 
 class SimpleRuleAgent:
     def __init__(self):
-        self.n_actions = 2
+        self.n_actions = 3
 
     def select_action(self, state, greedy=True):
         cap, onboard, *_ = state
         cap = max(1.0, float(cap))
         load = float(onboard) / cap
         if load > 0.85:
-            return 0
+            return 0  # Add carriage
         if load > 0.5:
-            return 1
-        return 1
+            return 1  # Widen carriage
+        return 2  # No action (default)
 
     def policy(self, state, greedy=False):
         return self.select_action(state, greedy=greedy)
