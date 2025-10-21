@@ -6,7 +6,8 @@ import threading
 import time
 import pickle
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
+
 
 import numpy as np
 import torch
@@ -285,6 +286,8 @@ class TrainGameApp:
 
         self.state, _ = self.env.reset()
         self.running = False
+        self.training_thread = None
+        self.stop_training_flag = threading.Event()
 
         self.show_home_screen()
 
@@ -294,6 +297,12 @@ class TrainGameApp:
     def clear_screen(self):
         for widget in self.root.winfo_children():
             widget.destroy()
+            
+    def show_leaderboards(self):
+        # You can add leaderboard logic here later
+        self.clear_screen()
+        tk.Label(self.root, text="Leaderboards (Coming Soon)", font=("Arial Black", 24), bg="#202020", fg="white").pack(pady=60)
+        tk.Button(self.root, text="Back", font=("Arial", 16), command=self.show_home_screen).pack(pady=30)
 
     def show_home_screen(self):
         self.clear_screen()
@@ -309,12 +318,14 @@ class TrainGameApp:
             "Arial", 20), width=15, command=self.choose_agent_screen)
         btn_agent.pack(pady=15)
 
+        btn_lab = tk.Button(self.root, text="Live Training Lab", font=(
+            "Arial", 20), width=15, command=self.show_live_training_lab)
+        btn_lab.pack(pady=15)
+
         btn_leaderboard = tk.Button(self.root, text="Leaderboards", font=(
             "Arial", 20), width=15, command=self.show_leaderboards)
         btn_leaderboard.pack(pady=15)
 
-    def show_instructions(self):
-        self.clear_screen()
         lbl = tk.Label(
             self.root,
             text=(
@@ -334,18 +345,194 @@ class TrainGameApp:
         lbl.pack(padx=30, pady=40)
         self.root.bind("<Button-1>", lambda e: self.start_game())
 
-    def show_leaderboards(self):
+    def show_live_training_lab(self):
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         self.clear_screen()
-        lbl = tk.Label(self.root, text="🏆 Leaderboards\n\n(Coming soon!)", font=(
-            "Arial", 20), bg="#202020", fg="white")
-        lbl.pack(pady=150)
-        back = tk.Button(self.root, text="Back", font=(
-            "Arial", 16), command=self.show_home_screen)
-        back.pack(pady=30)
+        self.stop_training_flag.clear()
 
-    # ========================
-    # GAME UI
-    # ========================
+        # Main frame
+        main_frame = tk.Frame(self.root, bg="#202020")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Left panel for controls
+        control_panel = tk.Frame(main_frame, bg="#2c2c2c", width=250)
+        control_panel.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+
+        # Right panel for visualization
+        vis_panel = tk.Frame(main_frame, bg="#202020")
+        vis_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # --- Control Panel Widgets ---
+        tk.Label(control_panel, text="🚀 Live Training Lab", font=("Arial Black", 16), bg="#2c2c2c", fg="white").pack(pady=10)
+
+        # Agent selection
+        tk.Label(control_panel, text="Agent:", font=("Arial", 12), bg="#2c2c2c", fg="white").pack(pady=(10,0))
+        self.agent_var = tk.StringVar(value='Q-Learning')
+        agent_menu = ttk.Combobox(control_panel, textvariable=self.agent_var, values=['Q-Learning', 'Actor-Critic'])
+        agent_menu.pack(pady=5)
+
+        # Hyperparameter sliders
+        self.hyperparams = {}
+        self.slider_frame = tk.Frame(control_panel, bg="#2c2c2c")
+        self.slider_frame.pack(pady=20, fill=tk.X, padx=5)
+
+        def create_slider(parent, name, from_, to, resolution, default):
+            frame = tk.Frame(parent, bg="#2c2c2c")
+            label = tk.Label(frame, text=name, font=("Arial", 10), bg="#2c2c2c", fg="white")
+            label.pack()
+            var = tk.DoubleVar(value=default)
+            slider = tk.Scale(frame, variable=var, from_=from_, to=to, resolution=resolution, orient=tk.HORIZONTAL, bg="#2c2c2c", fg="white", troughcolor="#555")
+            slider.pack(fill=tk.X)
+            self.hyperparams[name] = var
+            return frame
+
+        # Sliders for Q-Learning
+        self.q_sliders = [
+            create_slider(self.slider_frame, "Epsilon", 0.0, 1.0, 0.01, 0.1),
+            create_slider(self.slider_frame, "Alpha", 0.01, 1.0, 0.01, 0.1),
+            create_slider(self.slider_frame, "Gamma", 0.8, 1.0, 0.01, 0.99)
+        ]
+
+        # Sliders for Actor-Critic
+        self.ac_sliders = [
+            create_slider(self.slider_frame, "Learning Rate", 1e-5, 1e-2, 1e-5, 3e-4),
+            create_slider(self.slider_frame, "Gamma", 0.8, 1.0, 0.01, 0.99),
+            create_slider(self.slider_frame, "Entropy Coef", 0.0, 0.1, 0.001, 0.01)
+        ]
+
+        def on_agent_change(*args):
+            agent = self.agent_var.get()
+            for slider in self.q_sliders + self.ac_sliders:
+                slider.pack_forget()
+            if agent == 'Q-Learning':
+                for slider in self.q_sliders:
+                    slider.pack(pady=5)
+            else:
+                for slider in self.ac_sliders:
+                    slider.pack(pady=5)
+        
+        self.agent_var.trace("w", on_agent_change)
+        on_agent_change() # Initial setup
+
+        # Start/Stop buttons
+        self.start_button = tk.Button(control_panel, text="Start Training", font=("Arial", 14), command=self.start_live_training)
+        self.start_button.pack(pady=10)
+        self.stop_button = tk.Button(control_panel, text="Stop Training", font=("Arial", 14), command=self.stop_live_training, state=tk.DISABLED)
+        self.stop_button.pack(pady=5)
+
+        tk.Button(control_panel, text="Back to Menu", font=("Arial", 12), command=self.return_home).pack(side=tk.BOTTOM, pady=20)
+
+        # --- Visualization Panel Widgets ---
+        # Matplotlib chart
+        self.fig, self.ax = plt.subplots(figsize=(8, 4))
+        self.ax.set_title("Live Score Over Episodes")
+        self.ax.set_xlabel("Episode")
+        self.ax.set_ylabel("Score")
+        self.ax.grid(True)
+        self.line, = self.ax.plot([], [], 'r-')
+
+        self.canvas_plt = FigureCanvasTkAgg(self.fig, master=vis_panel)
+        self.canvas_plt.get_tk_widget().pack(pady=10)
+
+        # Game canvas
+        self.canvas = tk.Canvas(vis_panel, width=700, height=120, bg="#303030", highlightthickness=0)
+        self.canvas.pack(pady=10)
+        self.station_coords = []
+        for i, st in enumerate(self.env.stations):
+            x = 80 + i * 80
+            self.canvas.create_oval(x - 5, 80 - 5, x + 5, 80 + 5, fill="white")
+            self.canvas.create_text(x, 100, text=st, fill="white", font=("Arial", 10))
+            self.station_coords.append(x)
+        self.train = self.canvas.create_rectangle(70, 60, 90, 75, fill="cyan")
+
+    def start_live_training(self):
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        self.stop_training_flag.clear()
+
+        self.training_thread = threading.Thread(target=self.live_training_loop, daemon=True)
+        self.training_thread.start()
+
+    def stop_live_training(self):
+        self.stop_training_flag.set()
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+
+    def live_training_loop(self):
+        agent_name = self.agent_var.get()
+        
+        # Instantiate agent
+        if agent_name == 'Q-Learning':
+            from scripts.agents import QLearningAgent
+            agent = QLearningAgent(n_actions=self.env.action_space.n)
+        elif agent_name == 'Actor-Critic':
+            from scripts.agents import ActorCriticAgent
+            agent = ActorCriticAgent()
+        else:
+            return
+
+        scores = []
+        episodes = []
+
+        for ep in range(10000): # Effectively infinite loop
+            if self.stop_training_flag.is_set():
+                break
+
+            # Update hyperparameters from GUI at the start of each episode
+            if agent_name == 'Q-Learning':
+                agent.eps = self.hyperparams["Epsilon"].get()
+                agent.alpha = self.hyperparams["Alpha"].get()
+                agent.gamma = self.hyperparams["Gamma"].get()
+            elif agent_name == 'Actor-Critic':
+                # Note: Changing LR mid-training requires re-creating the optimizer
+                for g in agent.optimizer.param_groups:
+                    g['lr'] = self.hyperparams["Learning Rate"].get()
+                agent.gamma = self.hyperparams["Gamma"].get()
+                agent.entropy_coef = self.hyperparams["Entropy Coef"].get()
+
+            state, _ = self.env.reset()
+            done = False
+            ep_reward = 0
+            
+            # Simplified training loop for live visualization
+            trajectory = []
+            while not done:
+                if isinstance(agent, ActorCriticAgent):
+                    action, log_prob, value = agent.policy(state)
+                    next_state, reward, term, trunc, info = self.env.step(action)
+                    trajectory.append((state, (action, log_prob, value), reward, next_state, term, trunc))
+                else: # Q-Learning
+                    action = agent.policy(state)
+                    next_state, reward, term, trunc, info = self.env.step(action)
+                    agent.update(state, action, reward, next_state, term, trunc)
+
+                state = next_state
+                ep_reward += reward
+                done = term or trunc
+
+                # Update game canvas
+                self.root.after(0, self.move_train)
+                time.sleep(0.01) # Small delay to allow UI to update
+
+            if isinstance(agent, ActorCriticAgent):
+                agent.learn(trajectory)
+
+            final_score, _ = self.env.final_score()
+            scores.append(final_score)
+            episodes.append(ep)
+
+            # Update plot
+            self.line.set_data(episodes, scores)
+            self.ax.relim()
+            self.ax.autoscale_view()
+            self.root.after(0, self.canvas_plt.draw)
+
+        print("Live training stopped.")
+
+    def show_instructions(self):
+        pass
+
     def start_game(self):
         self.root.unbind("<Button-1>")
         self.clear_screen()
@@ -444,6 +631,7 @@ class TrainGameApp:
         self.info_label.config(text=info_text)
 
     def return_home(self):
+        self.stop_live_training()
         try:
             self.env.close()
         except Exception:
