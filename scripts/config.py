@@ -24,18 +24,25 @@ Q_LEARNING_CONFIG = {
     'alpha_min': 0.01
 }
 
+# --- CHANGES ARE HERE ---
 ACTOR_CRITIC_CONFIG = {
     'state_dim': 6,
     'action_dim': 3,
-    'lr': 3e-4,
+    'lr': 1e-4,          # <-- Lowered learning rate for more stable updates
     'gamma': 0.99,
-    'entropy_coef': 0.01
+    'entropy_coef': 0.005 # <-- Reduced to encourage less random action (exploitation)
 }
 
 # Environment parameters
 N_ACTIONS = 3
-ACTION_NAMES = ['Add Carriage', 'Widen Doors', 'No Action']
+ACTION_NAMES = ['Add Carriage', 'Widen Carriage', 'No Action']
 
 # File paths
-SAVED_AGENTS_DIR = '../saved_agents'
-RESULTS_DIR = '../results'
+from pathlib import Path
+
+# Base directory of the project
+BASE_DIR = Path(__file__).parent.parent
+
+# File paths
+SAVED_AGENTS_DIR = BASE_DIR / 'saved_agents'
+RESULTS_DIR = BASE_DIR / 'results'
